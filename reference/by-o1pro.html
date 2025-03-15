@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>3軸ロボットアーム デモ</title>
+    <!-- Three.js のCDN読み込み（バージョンは必要に応じて変更してください） -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/build/three.min.js"></script>
+    <!-- OrbitControls を使用するための追加スクリプト -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/examples/js/controls/OrbitControls.js"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #f0f0f0;
+        }
+
+        #container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+        }
+
+        #infoPanel {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(255, 255, 255, 0.8);
+            padding: 10px;
+            border-radius: 4px;
+            font-family: sans-serif;
+            font-size: 14px;
+        }
+
+        #infoPanel input {
+            width: 60px;
+            margin-right: 4px;
+        }
+
+        #infoPanel button {
+            margin: 4px 0;
+        }
+
+        #infoPanel .row {
+            margin-bottom: 6px;
+        }
+
+        #infoPanel label {
+            display: inline-block;
+            width: 20px;
+            text-align: right;
+            margin-right: 4px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="container"></div>
+
+    <div id="infoPanel">
+        <div><strong>ジョイント角度 [°]</strong></div>
+        <div class="row">
+            <label>j1</label><input type="number" id="j1Input" value="0">
+            <label>j2</label><input type="number" id="j2Input" value="0">
+            <label>j3</label><input type="number" id="j3Input" value="0">
+        </div>
+        <button id="setAngleBtn">角度でセット</button>
+        <hr>
+        <div><strong>先端座標</strong></div>
+        <div class="row">
+            <label>x</label><input type="number" id="xInput" value="0">
+            <label>y</label><input type="number" id="yInput" value="0">
+            <label>z</label><input type="number" id="zInput" value="5">
+        </div>
+        <button id="setPosBtn">座標でセット</button>
+        <hr>
+        <div>
+            <button id="animateBtn">アニメーション移動</button>
+            <br>
+            <label>速度: </label><input type="number" id="speedInput" value="1.0" step="0.1">
+        </div>
+    </div>
+
+    <script>
+        // ----------------------------------------------------
+        // 定数設定
+        // ----------------------------------------------------
+
+        // リンクの長さ
+        const L1 = 1.35;  // 土台 〜 関節1
+        const L2 = 1.47;  // 関節1 〜 関節2
+        const L3 = 0.60;  // 関節2 〜 先端
+
+        // 各モーターの回転範囲（例）
+        const j1_min = -180, j1_max = 180;
+        const j2_min = -90, j2_max = 90;
+        const j3_min = -90, j3_max = 90;
+
+        // ----------------------------------------------------
+        // 順運動学: (j1, j2, j3) -> (x, y, z)
+        // ----------------------------------------------------
+        function forwardKinematics(j1_deg, j2_deg, j3_deg) {
+            // Three.js 等で回転に使う場合はラジアンが必要なので変換
+            const j1 = THREE.MathUtils.degToRad(j1_deg);
+            const j2 = THREE.MathUtils.degToRad(j2_deg);
+            const j3 = THREE.MathUtils.degToRad(j3_deg);
+
+            // 回転行列を逐次適用するイメージでベクトルを加算していく
+            // base(0,0,0) → Joint1 → Joint2 → EndEffector
+
+            // まず、土台回転 j1 (Y軸回転) 後に L1 の位置へ
+            // ベクトル(0,0,L1)を Y軸回転 j1 して足す
+            const p1x = Math.sin(j1) * L1;
+            const p1y = 0;
+            const p1z = Math.cos(j1) * L1;
+
+            // 次に、Joint1 を X軸回転 j2 させた後に L2 の位置へ
+            // (0,0,L2) を X軸回転 j2 して、その結果をさらにY軸回転 j1 へ合成
+            // まず X軸回転 j2: (0,0,L2) -> (0, L2*sin(j2), L2*cos(j2))
+            let v2x = 0;
+            let v2y = L2 * Math.sin(j2);
+            let v2z = L2 * Math.cos(j2);
+            // さらにそれを Y軸回転 j1 (ベースの回転と同じ) へ合成
+            // Y軸回転 j1: x' = x*cos(j1) + z*sin(j1), z' = -x*sin(j1) + z*cos(j1)
+            // ただし x=0 のため簡略化
+            let v2x2 = v2z * Math.sin(j1);
+            let v2y2 = v2y; // Y回転ではyは変わらない
+            let v2z2 = v2z * Math.cos(j1);
+
+            // Joint1の位置 p1 に上記を足して Joint2の位置を得る
+            const p2x = p1x + v2x2;
+            const p2y = p1y + v2y2;
+            const p2z = p1z + v2z2;
+
+            // 最後に、Joint2 を X軸回転 j3 させた後に L3 の位置へ
+            // (0,0,L3) を X軸回転 j3 -> さらに X軸回転 j2 -> さらに Y軸回転 j1
+            // 本来は正確には Joint2 のローカル座標系で回転してから、
+            // Joint1 での回転を経て、ベースの回転へ... という順で合成します。
+            // 簡易的に1ステップずつ行列を適用します。
+            // ----------------------------------------------
+            // Step1: v3 = (0,0,L3) を X軸回転 j3
+            let v3x = 0;
+            let v3y = L3 * Math.sin(j3);
+            let v3z = L3 * Math.cos(j3);
+
+            // Step2: その結果をさらに X軸回転 j2 へ適用 (Joint1回り)
+            // X軸回転 j2:
+            //   y' = y*cos(j2) - z*sin(j2)
+            //   z' = y*sin(j2) + z*cos(j2)
+            let tmpy = v3y * Math.cos(j2) - v3z * Math.sin(j2);
+            let tmpz = v3y * Math.sin(j2) + v3z * Math.cos(j2);
+            v3y = tmpy;
+            v3z = tmpz;
+
+            // Step3: さらに Y軸回転 j1 (ベース回り)
+            // Y軸回転 j1:
+            //   x' = x*cos(j1) + z*sin(j1)
+            //   z' = -x*sin(j1) + z*cos(j1)
+            // ただし x=0 のため x' = z*sin(j1), z' = z*cos(j1)
+            let tmpx = v3z * Math.sin(j1);
+            tmpy = v3y;  // Y 回転では y そのまま
+            tmpz = v3z * Math.cos(j1);
+
+            v3x = tmpx;
+            v3y = tmpy;
+            v3z = tmpz;
+
+            // これを p2 に足せば先端(EoT)のワールド座標
+            const p3x = p2x + v3x;
+            const p3y = p2y + v3y;
+            const p3z = p2z + v3z;
+
+            return { x: p3x, y: p3y, z: p3z };
+        }
+
+        // ----------------------------------------------------
+        // 逆運動学: (x, y, z) -> (j1, j2, j3)
+        //   ※かなり簡易的・制限付きのサンプルです
+        // ----------------------------------------------------
+        function inverseKinematics(x, y, z) {
+            // 定数の定義
+            const L1 = 0.0;    // アーム基点の高さ
+            const L2 = 135.0;  // アーム1の辺の長さ
+            const L3 = 147.0;  // アーム2の辺の長さ
+            const L4 = 60.0;   // エンドエフェクタの突き出し部分
+            const PI = Math.PI;
+
+            // X-Y平面上のアーム部分の長さ
+            const l = Math.sqrt(x * x + y * y);
+
+            if (l <= L4) {
+                console.log("l <= L4")
+                return null; // 計算不可能な場合
+            }
+
+            // X-Y 平面上のアームの角度
+            const th1 = Math.atan2(y, x);
+
+            // アーム1、2の底辺の長さ
+            const ld = Math.sqrt(l * l + (z - L1) * (z - L1));
+
+            if (ld <= 0 || ld >= (L2 + L3)) {
+                console.log("ld <= 0 || ld >= (L2 + L3)")
+                return null; // 計算不可能な場合
+            }
+
+            // アーム基点から先端への仰角
+            const phi = Math.atan2(z - L1, l);
+
+            // アーム1の角度
+            const th2 = phi + Math.acos((ld * ld + L2 * L2 - L3 * L3) / (2.0 * ld * L2));
+
+            // アーム2のアーム1からの角度
+            const th3 = Math.asin((ld * ld - L2 * L2 - L3 * L3) / (2.0 * L2 * L3)) + PI / 2.0;
+
+            // ラジアンからデグリに変換
+            const A1 = th1 * 180.0 / PI;
+            const A2 = th2 * 180.0 / PI;
+            const A3 = th3 * 180.0 / PI;
+
+            // Dobot Armの角度に変換
+            const J1 = A1;
+            const J2 = 90.0 - A2;
+            const J3 = 180.0 - A2 - A3;
+
+            // ---表示用の角度に変換
+            const J1_disp = A1;
+            const J2_disp = -A2;
+            const J3_disp = A2 + (180 - A2 - A3);
+
+            console.log("A系: ", A1, A2, A3)
+            console.log("J系: ", J1, J2, J3)
+            console.log("表示: ", J1_disp, J2_disp, J3_disp)
+            setAngles(J1_disp, J2_disp, J3_disp);
+            return {
+                j1: J1,
+                j2: J2,
+                j3: J3
+            };
+        }
+
+        // ----------------------------------------------------
+        // Three.js シーン構築
+        // ----------------------------------------------------
+        let scene, camera, renderer, controls;
+
+        // アームを構成するオブジェクト(ベース, アーム1, アーム2, 先端など)
+        let baseMesh, arm1Mesh, arm2Mesh, endMesh;
+
+        // 現在のジョイント角度（degree管理）
+        let currentJ1 = 0;
+        let currentJ2 = -90;
+        let currentJ3 = 180;
+        updateAngleFields();
+
+        init();
+        animate();
+
+        function init() {
+            const container = document.getElementById('container');
+
+            // シーン
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xeeeeee);
+
+            // カメラ
+            camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 100);
+            camera.position.set(6, 6, 10);
+
+            // レンダラー
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            container.appendChild(renderer.domElement);
+
+            // コントロール(OrbitControls)
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.target.set(0, 2, 0);
+
+            // 環境光
+            scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+
+            // ちょっとだけ方向光
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+            dirLight.position.set(10, 10, 10);
+            scene.add(dirLight);
+
+            // 地面
+            const gridHelper = new THREE.GridHelper(20, 20);
+            scene.add(gridHelper);
+
+            // ----------------------------------------------------
+            // ロボットアーム用のMeshを準備（シンプルに箱）
+            // ----------------------------------------------------
+
+            // 1) ベース（土台）: 回転中心
+            const baseGeo = new THREE.BoxGeometry(1, 0.5, 1);
+            const baseMat = new THREE.MeshPhongMaterial({ color: 0x888888 });
+            baseMesh = new THREE.Mesh(baseGeo, baseMat);
+            baseMesh.position.set(0, 0.25, 0); // 地面から少し上
+            scene.add(baseMesh);
+
+            // 2) アーム1: 長さ L1 の箱 (縦長に見せたいなら y軸方向拡大等, ここでは z方向として仮想)
+            const arm1Geo = new THREE.BoxGeometry(0.3, 0.3, L1);
+            arm1Geo.translate(0, 0, L1 / 2); // ジオメトリをZ方向に L1/2 だけ平行移動
+            const arm1Mat = new THREE.MeshPhongMaterial({ color: 0xff0000 });
+            arm1Mesh = new THREE.Mesh(arm1Geo, arm1Mat);
+            // // デフォルトで中心がメッシュの中央にあるので、先端が (0,0,L1/2) になるようにする
+            // // あとで回転するときの基準に合わせる
+            // arm1Mesh.position.set(0, 0, L1 / 2);
+            // 回転の起点をリンクの根元に合わせたため、Mesh の位置は(0,0,0)
+            arm1Mesh.position.set(0, 0, 0);
+            baseMesh.add(arm1Mesh);
+
+
+            // 3) アーム2: 長さ L2 の箱
+            const arm2Geo = new THREE.BoxGeometry(0.3, 0.3, L2);
+            arm2Geo.translate(0, 0, L2 / 2);
+            const arm2Mat = new THREE.MeshPhongMaterial({ color: 0x00ff00 });
+            arm2Mesh = new THREE.Mesh(arm2Geo, arm2Mat);
+            // // 肩関節(arm1の先)の位置がローカル(0,0,L1/2)付近にあるので、そこを回転中心にしたい場合は
+            // // arm2Mesh の位置を z方向に L2/2 ずらして取り付け
+            // arm2Mesh.position.set(0, 0, L2 / 2);
+            // アーム1 先端 (Z=L1) に取り付けるので position は (0,0,L1)
+            arm2Mesh.position.set(0, 0, L1);
+            arm1Mesh.add(arm2Mesh);
+
+            // 4) エンドエフェクタ: 長さ L3 の箱（あまり長くしない）
+            const endGeo = new THREE.BoxGeometry(0.2, 0.2, L3);
+            endGeo.translate(0, 0, L3 / 2);
+            const endMat = new THREE.MeshPhongMaterial({ color: 0x0000ff });
+            endMesh = new THREE.Mesh(endGeo, endMat);
+            // endMesh.position.set(0, 0, L3 / 2);
+            // アーム2 先端 (Z=L2) に取り付けるので position は (0,0,L2)
+            endMesh.position.set(0, 0, L2);
+            arm2Mesh.add(endMesh);
+
+            // ----------------------------------------------------
+            // GUI イベント設定
+            // ----------------------------------------------------
+            document.getElementById('setAngleBtn').addEventListener('click', () => {
+                // 入力された角度をそのまま適用
+                const j1 = parseFloat(document.getElementById('j1Input').value);
+                const j2 = parseFloat(document.getElementById('j2Input').value);
+                const j3 = parseFloat(document.getElementById('j3Input').value);
+                setAngles(j1, j2, j3);
+                updateEndPosFields();
+            });
+
+            document.getElementById('setPosBtn').addEventListener('click', () => {
+                // 入力された (x,y,z) から逆運動学
+                const x = parseFloat(document.getElementById('xInput').value);
+                const y = parseFloat(document.getElementById('yInput').value);
+                const z = parseFloat(document.getElementById('zInput').value);
+
+                const { j1, j2, j3 } = inverseKinematics(x, y, z);
+                setAngles(j1, j2, j3);
+                updateAngleFields();
+            });
+
+            document.getElementById('animateBtn').addEventListener('click', () => {
+                // 入力された (j1,j2,j3) または (x,y,z) までをアニメーションで動かすサンプル
+                const speed = parseFloat(document.getElementById('speedInput').value);
+
+                // とりあえず、(j1, j2, j3) が入力フィールドの値か
+                // (x,y,z) のいずれかで動かすかは自由に切り替えてください。
+                // ここでは角度でやる例にします。
+                const targetJ1 = parseFloat(document.getElementById('j1Input').value);
+                const targetJ2 = parseFloat(document.getElementById('j2Input').value);
+                const targetJ3 = parseFloat(document.getElementById('j3Input').value);
+
+                animateToAngles(targetJ1, targetJ2, targetJ3, speed);
+            });
+        }
+
+        // 現在角度を更新（即時反映）
+        function setAngles(j1, j2, j3) {
+            // currentJ1 = THREE.MathUtils.clamp(j1, j1_min, j1_max);
+            // currentJ2 = THREE.MathUtils.clamp(j2, j2_min, j2_max);
+            // currentJ3 = THREE.MathUtils.clamp(j3, j3_min, j3_max);
+            currentJ1 = j1;
+            currentJ2 = j2;
+            currentJ3 = j3;
+
+            // Three.js の回転はラジアン
+            baseMesh.rotation.y = THREE.MathUtils.degToRad(currentJ1);
+            arm1Mesh.rotation.x = THREE.MathUtils.degToRad(currentJ2);
+            arm2Mesh.rotation.x = THREE.MathUtils.degToRad(currentJ3);
+        }
+
+        // フィールドに先端座標を反映
+        function updateEndPosFields() {
+            const endPos = forwardKinematics(currentJ1, currentJ2, currentJ3);
+            document.getElementById('xInput').value = endPos.x.toFixed(2);
+            document.getElementById('yInput').value = endPos.y.toFixed(2);
+            document.getElementById('zInput').value = endPos.z.toFixed(2);
+        }
+
+        // フィールドに角度を反映
+        function updateAngleFields() {
+            document.getElementById('j1Input').value = currentJ1.toFixed(2);
+            document.getElementById('j2Input').value = currentJ2.toFixed(2);
+            document.getElementById('j3Input').value = currentJ3.toFixed(2);
+        }
+
+        // 現在角度 -> ターゲット角度 へ補間しながらアニメーション
+        function animateToAngles(tJ1, tJ2, tJ3, speed) {
+            // speed は 1.0 なら1秒程度で移動、みたいなイメージ
+            // 単純に補間してみる
+            const steps = 60; // 60ステップで補間する
+            const frameTime = 1000 / 60; // 60fps
+            let count = 0;
+
+            const startJ1 = currentJ1;
+            const startJ2 = currentJ2;
+            const startJ3 = currentJ3;
+            const diffJ1 = tJ1 - startJ1;
+            const diffJ2 = tJ2 - startJ2;
+            const diffJ3 = tJ3 - startJ3;
+
+            function step() {
+                count++;
+                const ratio = count / steps;
+                const newJ1 = startJ1 + diffJ1 * ratio;
+                const newJ2 = startJ2 + diffJ2 * ratio;
+                const newJ3 = startJ3 + diffJ3 * ratio;
+                setAngles(newJ1, newJ2, newJ3);
+                updateEndPosFields();
+
+                if (count < steps) {
+                    setTimeout(step, frameTime / speed);
+                } else {
+                    // 終了後、最終的に正確な値をセットしておく
+                    setAngles(tJ1, tJ2, tJ3);
+                    updateEndPosFields();
+                    updateAngleFields();
+                }
+            }
+            step();
+        }
+
+        // 毎フレーム描画
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+
+</html>
