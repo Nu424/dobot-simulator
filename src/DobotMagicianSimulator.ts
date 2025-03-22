@@ -1,4 +1,38 @@
+/*
+# DobotMagicianSimulator.ts
+DobotMagicianの動作をウェブ上でシミュレートするためのクラス
+
+## 使い方
+```ts
+// ----------
+// ---基本的な使い方
+// ----------
+// ---シミュレータの作成
+const simulator = new DobotMagicianSimulator(rootElement);
+simulator.init();
+
+// ---アームの表示変更
+simulator.setArmByXYZ({ x: 200, y: 0, z: 0 });
+simulator.setArmByDobotAngles({ j1: 0, j2: 0, j3: 0 });
+
+// ---アームのアニメーション
+simulator.animateArmByXYZ({ x: 200, y: 0, z: 0 }, 100);
+simulator.animateArmByDobotAngles({ j1: 0, j2: 0, j3: 0 }, 100);
+
+// ----------
+// ---より低レベルな使い方
+// ----------
+// ---表示の即時更新
+simulator.updateArmDisplayByTjsAngles();
+
+// ---運動学の計算
+const ikResult = simulator.calcInverseKinematics({ x: 200, y: 0, z: 0 });
+const fkResult = simulator.calcForwardKinematics({ j1: 0, j2: 25.40, j3: 56.05 });
+```
+*/
+
 import * as THREE from 'three';
+// @ts-ignore
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
 export interface Position {
@@ -52,10 +86,18 @@ export class DobotMagicianSimulator {
     xyz: Position = { x: 0, y: 0, z: 0 };
     threejsAngles: Angle = { j1: 0, j2: 0, j3: 0 };
     dobotAngles: Angle = { j1: 0, j2: 0, j3: 0 };
+    INITIAL_XYZ: Position = { x: 200, y: 0, z: 0 };
+
+    // ---アニメーション中のフラグ
+    isAnimating: boolean = false;
 
     constructor(rootElement: HTMLElement) {
         this.rootElement = rootElement;
     }
+
+    // ----------
+    // ---初期化
+    // ----------
     public init() {
         // ----------
         // ---シーンの作成
@@ -131,9 +173,12 @@ export class DobotMagicianSimulator {
         this.arm2Mesh.add(this.endEffectorMesh);
 
         // ----------
-        // ---アニメーション開始
+        // ---Threejsのアニメーション
         // ----------
         this.animate();
+
+        // ---初期位置を設定・計算
+        this.setArmByXYZ(this.INITIAL_XYZ);
     }
 
     public animate() {
@@ -143,79 +188,45 @@ export class DobotMagicianSimulator {
         requestAnimationFrame(() => this.animate());
     }
 
+    // ----------
+    // ---アーム座標の更新
+    // ----------
     /**
-     * アーム座標を、XYZから更新する関数
+     * アーム座標を、XYZから更新する
      * @param pos エンドエフェクタの位置（Positionオブジェクト）
      * @note 主に担当するのは、アーム座標の更新。実際のメッシュ移動はmoveArmByThree()で行う
      */
-    public updateArmByXYZ(pos: Position) {
+    public setArmByXYZ(pos: Position) {
         const result = this.calcInverseKinematics(pos);
-        console.log(result)
         if (result.success) {
             this.xyz = result.xyz;
             this.threejsAngles = result.threejsAngles;
             this.dobotAngles = result.dobotAngles;
-            this.moveArmByThreejsAngles();
+            this.updateArmDisplayByTjsAngles();
         }
     }
 
-    public async updateArmByXYZAnimation(targetPos: Position, speed: number, finishThreshold: number = 5) {
-        // speed: mm/sを想定する
-        // ---現在の位置から目標位置までのベクトルを作成する
-        const startToEndVector = {
-            x: targetPos.x - this.xyz.x,
-            y: targetPos.y - this.xyz.y,
-            z: targetPos.z - this.xyz.z,
+    /**
+     * アーム角度を、Dobotの角度から更新する
+     * @param angles Dobotの角度（Angleオブジェクト）
+     */
+    public setArmByDobotAngles(angles: Angle) {
+        const result = this.calcForwardKinematics(angles);
+        if (result.success) {
+            this.xyz = result.xyz;
+            this.threejsAngles = result.threejsAngles;
+            this.dobotAngles = result.dobotAngles;
+            this.updateArmDisplayByTjsAngles();
         }
-        let rafId: number | null = null;
-        let prevRafTime = performance.now();
-        const updateArmByXYZAnimationRaf = () => {
-            // ---前のrafからの経過時間を取得
-            const now = performance.now();
-            const deltaTime = (now - prevRafTime) / 1000; // 秒に変換
-            if (deltaTime < 0.03) {
-                // ---次のアニメーションフレームをリクエスト
-                rafId = requestAnimationFrame(updateArmByXYZAnimationRaf);
-                return;
-            }
-            // ---移動すべき距離を計算
-            const moveDistance = speed * deltaTime
-            // ---移動ベクトルを算出する
-            const totalMoveVectorSize = Math.sqrt(
-                startToEndVector.x ** 2 + startToEndVector.y ** 2 + startToEndVector.z ** 2
-            );
-            const moveVector = {
-                x: startToEndVector.x * (moveDistance / totalMoveVectorSize),
-                y: startToEndVector.y * (moveDistance / totalMoveVectorSize),
-                z: startToEndVector.z * (moveDistance / totalMoveVectorSize),
-            }
-            // ---現在の位置を更新
-            const newXYZ = {
-                x: this.xyz.x + moveVector.x,
-                y: this.xyz.y + moveVector.y,
-                z: this.xyz.z + moveVector.z,
-            }
-            // ---現在の位置を更新
-            this.updateArmByXYZ(newXYZ);
-            // ---目標位置に到達したら終了
-            const distanceToTarget = Math.sqrt(
-                (targetPos.x - newXYZ.x) ** 2 + (targetPos.y - newXYZ.y) ** 2 + (targetPos.z - newXYZ.z) ** 2
-            );
-            // console.log(deltaTime, moveDistance, totalMoveVectorSize, moveVector, newXYZ, distanceToTarget)
-            if (distanceToTarget < finishThreshold && rafId) {
-                cancelAnimationFrame(rafId);
-                console.log("Finished");
-                this.updateArmByXYZ(targetPos);
-                return;
-            }
-
-            prevRafTime = now;
-            rafId = requestAnimationFrame(updateArmByXYZAnimationRaf);
-        }
-        updateArmByXYZAnimationRaf();
     }
 
-    public moveArmByThreejsAngles() {
+    // ----------
+    // ---アームの表示変更
+    // ----------
+    /**
+     * アームメッシュの角度を、Threejsの角度から更新する
+     */
+    public updateArmDisplayByTjsAngles() {
         if (!this.baseMesh || !this.arm1Mesh || !this.arm2Mesh || !this.endEffectorMesh) return;
         // ---メッシュの回転
         this.baseMesh.rotation.y = this.threejsAngles.j1 * Math.PI / 180;
@@ -228,11 +239,101 @@ export class DobotMagicianSimulator {
     }
 
     // ----------
+    // ---アーム座標のアニメーション
+    // ----------
+    /**
+     * アーム座標を、XYZの値を用いてアニメーションする
+     * @param targetPos 目標位置(Positionオブジェクト)
+     * @param speed 速度(mm/s)
+     * @param finishThreshold 到達判定閾値(mm)
+     */
+    public async animateArmByXYZ(targetPos: Position, speed: number, finishThreshold: number = 5, onFinish?: () => void) {
+        if (this.isAnimating) return;
+        this.isAnimating = true;
+        return new Promise((resolve, reject) => {
+            // speed: mm/sを想定する
+            // ---現在の位置から目標位置までのベクトルを作成する
+            const startToEndVector = {
+                x: targetPos.x - this.xyz.x,
+                y: targetPos.y - this.xyz.y,
+                z: targetPos.z - this.xyz.z,
+            }
+            if (startToEndVector.x === 0 && startToEndVector.y === 0 && startToEndVector.z === 0) {
+                resolve(true);
+                this.isAnimating = false;
+                onFinish?.();
+                return;
+            }
+            let rafId: number | null = null;
+            let prevRafTime = performance.now();
+            const updateArmByXYZAnimationRaf = () => {
+                // ---前のrafからの経過時間を取得
+                const now = performance.now();
+                const deltaTime = (now - prevRafTime) / 1000; // 秒に変換
+                if (deltaTime < 0.03) {
+                    // ---次のアニメーションフレームをリクエスト
+                    rafId = requestAnimationFrame(updateArmByXYZAnimationRaf)
+                    return; // ここでreturnしないと、以降の処理が実行されてしまうので、ここでreturnしておく
+                }
+                // ---移動すべき距離を計算
+                const moveDistance = speed * deltaTime
+                // ---移動ベクトルを算出する
+                const totalMoveVectorSize = Math.sqrt(
+                    startToEndVector.x ** 2 + startToEndVector.y ** 2 + startToEndVector.z ** 2
+                );
+                const moveVector = {
+                    x: startToEndVector.x * (moveDistance / totalMoveVectorSize),
+                    y: startToEndVector.y * (moveDistance / totalMoveVectorSize),
+                    z: startToEndVector.z * (moveDistance / totalMoveVectorSize),
+                }
+                // ---現在の位置を更新
+                const newXYZ = {
+                    x: this.xyz.x + moveVector.x,
+                    y: this.xyz.y + moveVector.y,
+                    z: this.xyz.z + moveVector.z,
+                }
+                // ---現在の位置を更新
+                this.setArmByXYZ(newXYZ);
+                // ---目標位置に到達したら終了
+                const distanceToTarget = Math.sqrt(
+                    (targetPos.x - newXYZ.x) ** 2 + (targetPos.y - newXYZ.y) ** 2 + (targetPos.z - newXYZ.z) ** 2
+                );
+                // console.log(deltaTime, moveDistance, totalMoveVectorSize, moveVector, newXYZ, distanceToTarget)
+                if (distanceToTarget < finishThreshold && rafId) {
+                    cancelAnimationFrame(rafId);
+                    this.setArmByXYZ(targetPos);
+                    this.isAnimating = false;
+                    onFinish?.();
+                    resolve(true);
+                    return;
+                }
+
+                prevRafTime = now;
+                rafId = requestAnimationFrame(updateArmByXYZAnimationRaf);
+            }
+            updateArmByXYZAnimationRaf();
+        });
+    }
+
+    /**
+     * アーム角度を、Dobotの角度を用いてアニメーションする
+     * @param targetAngles 目標角度(Angleオブジェクト)
+     * @param speed 速度(mm/s)
+     * @param finishThreshold 到達判定閾値(mm)
+     */
+    public async animateArmByDobotAngles(targetAngles: Angle, speed: number, finishThreshold: number = 5, onFinish?: () => void) {
+        const tryTargetPos = this.calcForwardKinematics(targetAngles);
+        if (tryTargetPos.success) {
+            await this.animateArmByXYZ(tryTargetPos.xyz, speed, finishThreshold, onFinish);
+        }
+    }
+
+    // ----------
     // ---運動学の計算
     // ----------
 
     /**
-     * Dobot Magicianのアーム角度を計算する関数
+     * Dobot Magicianのアーム角度を計算する
      * @param pos エンドエフェクタの位置（Positionオブジェクト）
      */
     calcInverseKinematics(pos: Position): ArmAngleResult {
@@ -291,6 +392,62 @@ export class DobotMagicianSimulator {
         return {
             success: true,
             xyz: pos,
+            rawAngles: { j1: A1, j2: A2, j3: A3 },
+            threejsAngles: { j1: tjsA1, j2: tjsA2, j3: tjsA3 },
+            dobotAngles: { j1, j2, j3 },
+        };
+    }
+
+    calcForwardKinematics(
+        angles: Angle,
+    ): ArmAngleResult {
+        const { j1, j2, j3 } = angles; // Dobotの角度
+
+        const A1 = j1;
+        const A2 = 90.0 - j2;
+        const A3 = 180.0 - A2 - j3;
+
+        const tjsA1 = A1;
+        const tjsA2 = -A2;
+        const tjsA3 = 180 - A3;
+
+        const th1 = A1 * Math.PI / 180;
+        const th2 = A2 * Math.PI / 180;
+        const th3 = A3 * Math.PI / 180;
+        console.log(th1, th2, th3)
+        console.log(j3 * Math.PI / 180)
+        console.log(th2 + th3 + (j3 * Math.PI / 180))
+
+        const horizontal = this.L1 * Math.cos(th2) - this.L2 * Math.cos(th2 + th3) + this.L3;
+        const x = horizontal * Math.cos(th1);
+        const y = horizontal * Math.sin(th1);
+        const z = this.L0 + this.L1 * Math.sin(th2) - this.L2 * Math.sin(th2 + th3);
+        console.log(x, y, z)
+
+        // ----------
+        // ---計算結果のチェック
+        // ----------
+        // エンドエフェクタ位置からX-Y平面上の距離を計算
+        const distanceXY = Math.sqrt(x * x + y * y);
+        // エンドエフェクタの突き出し部分を差し引いた、実際のアーム部分の長さ
+        const l = distanceXY - this.L3;
+
+        // X-Y平面上のアーム長が十分でなければ計算不能
+        if (l <= this.L3) {
+            return { success: false };
+        }
+
+        // アーム基点からエンドエフェクタ先端までの直線距離
+        const ld = Math.sqrt(l * l + Math.pow(z - this.L0, 2));
+
+        // ldが正でかつ、アーム1とアーム2の長さの合計未満である必要がある
+        if (ld <= 0 || ld >= (this.L1 + this.L2)) {
+            return { success: false };
+        }
+
+        return {
+            success: true,
+            xyz: { x, y, z },
             rawAngles: { j1: A1, j2: A2, j3: A3 },
             threejsAngles: { j1: tjsA1, j2: tjsA2, j3: tjsA3 },
             dobotAngles: { j1, j2, j3 },
