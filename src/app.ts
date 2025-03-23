@@ -1,8 +1,10 @@
 // ----------
-// ---DMSWrapperのコード
+// ---WebSocketで通信するコード
 // ----------
 import { DMSWrapper } from "./DMSWrapper";
-
+import { Simulated3ArmAdapter } from "./Simulated3ArmAdapter";
+// ---初期化
+// ---シミュレータ
 const rootElement = document.getElementById("root") as HTMLDivElement;
 const simulator = new DMSWrapper(rootElement);
 (async () => {
@@ -10,22 +12,40 @@ const simulator = new DMSWrapper(rootElement);
     await simulator.go_home();
 })();
 
-document.addEventListener("contextmenu", async (e) => {
-    e.preventDefault();
-    const randomPos = {
-        x: 200 + Math.random() * 100,
-        y: Math.random() * 200 - 100,
-        z: Math.random() * 100,
-    }
-    console.log(randomPos);
-    // await simulator.move_arm(randomPos, 100);
-    await simulator.move_arm_safe(randomPos, 100, 100);
-    console.log("finished")
-});
-document.addEventListener("dblclick", async (e) => {
-    e.preventDefault();
-    await simulator.go_home();
-});
+// ---WebSocket
+const ws = new WebSocket("ws://localhost:8000/ws");
+
+// ---シミュレータのアダプタ
+const simulated3ArmAdapter = new Simulated3ArmAdapter(ws, simulator);
+
+// ----------
+// ---DMSWrapperのコード
+// ----------
+// import { DMSWrapper } from "./DMSWrapper";
+
+// const rootElement = document.getElementById("root") as HTMLDivElement;
+// const simulator = new DMSWrapper(rootElement);
+// (async () => {
+//     await simulator.initiate();
+//     await simulator.go_home();
+// })();
+
+// document.addEventListener("contextmenu", async (e) => {
+//     e.preventDefault();
+//     const randomPos = {
+//         x: 200 + Math.random() * 100,
+//         y: Math.random() * 200 - 100,
+//         z: Math.random() * 100,
+//     }
+//     console.log(randomPos);
+//     // await simulator.move_arm(randomPos, 100);
+//     await simulator.move_arm_safe(randomPos, 100, 100);
+//     console.log("finished")
+// });
+// document.addEventListener("dblclick", async (e) => {
+//     e.preventDefault();
+//     await simulator.go_home();
+// });
 
 // ----------
 // ---DobotMagicianSimulatorのコード
